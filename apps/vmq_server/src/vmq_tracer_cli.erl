@@ -30,8 +30,8 @@ trace_client_cmd() ->
         [
          {rate_max, [{longname, "rate-max"},
                      {typecast, fun(RM) -> list_to_integer(RM) end}]},
-         {mountpoint, [{longname, "mountpount"},
-                     {typecast, fun(MP) -> MP end}]},
+         {mountpoint, [{longname, "mountpoint"},
+                       {typecast, fun(MP) -> MP end}]},
          {rate_interval, [{longname, "rate-interval"},
                           {typecast, fun(RI) -> list_to_integer(RI) end}]},
          {trunc_payload, [{longname, "trunc-payload"},
@@ -46,7 +46,7 @@ trace_client_cmd() ->
                 MP = proplists:get_value(mountpoint, Flags, ""),
                 case proplists:get_value('client-id', Keys) of
                     undefined ->
-                        Text = clique_status:text("You have to provide a client-id (example client-id=myclientid)"),
+                        Text = clique_status:text(trace_client_usage()),
                         [clique_status:alert([Text])];
                     CId ->
                         %% the group leader comes from the calling node
@@ -112,7 +112,7 @@ trace_client_usage() ->
      "  --rate-interval=<RateIntervalMS>\n",
      "      the interval in milliseconds over which the max number of messages\n",
      "      is allowed. Defaults to 100.\n",
-     "  --trunc-payload=<SizeInByts>\n",
+     "  --trunc-payload=<SizeInBytes>\n",
      "      control when the payload should be truncated for display.\n",
      "      Defaults to 200.\n"
     ].

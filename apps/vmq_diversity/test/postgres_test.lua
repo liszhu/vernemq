@@ -1,8 +1,8 @@
 config = {
     pool_id = "postgres_test",
-    user = "test_user",
-    password = "test_password",
-    database = "test_database"
+    user = "vmq_test_user",
+    password = "vmq_test_password",
+    database = "vmq_test_database"
 }
 
 postgres.ensure_pool(config)
@@ -51,11 +51,11 @@ end
 assert_result(results)
 
 -- same with prepared select statement
-assert(postgres.execute("postgres_test", "PREPARE select_all AS SELECT * FROM postgres_test_lua_tbl"))
-
-results = postgres.execute("postgres_test", "EXECUTE select_all")
-assert(#results == 4, "error in select")
-assert_result(results)
+--assert(postgres.execute("postgres_test", "PREPARE select_all AS SELECT * FROM postgres_test_lua_tbl"))
+--
+--results = postgres.execute("postgres_test", "EXECUTE select_all")
+--assert(#results == 4, "error in select")
+--assert_result(results)
 
 
 -- more complex query

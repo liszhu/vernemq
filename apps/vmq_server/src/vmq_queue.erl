@@ -17,6 +17,18 @@
 
 -behaviour(gen_fsm).
 
+-ifdef(otp20).
+-compile([{nowarn_deprecated_function,
+          [{gen_fsm,start_link,3},
+           {gen_fsm,reply,2},
+           {gen_fsm,send_event,2},
+           {gen_fsm,sync_send_event,3},
+           {gen_fsm,send_all_state_event,2},
+           {gen_fsm,sync_send_all_state_event,3},
+           {gen_fsm,send_event_after,2},
+           {gen_fsm,cancel_timer,1}]}]).
+-endif.
+
 %% API functions
 -export([start_link/2,
          active/1,
@@ -209,6 +221,8 @@ online({add_session, SessionPid, #{allow_multiple_sessions := false} = Opts}, Fr
     %% we've to disconnect currently attached sessions
     %% and wait with the reply until all the sessions
     %% have been disconnected
+    #state{id = SubscriberId} = State,
+    lager:debug("client ~p disconnected due to multiple sessions not allowed", [SubscriberId]),
     disconnect_sessions(State),
     {next_state, state_change(add_session, online, wait_for_offline),
      State#state{waiting_call={add_session, SessionPid, Opts, From}}};
@@ -722,10 +736,10 @@ insert_from_session(#session{queue=Queue},
     %% allow other sessions to balance the messages of the dead queue
     insert_from_queue(Queue, State).
 
-insert_from_queue(#queue{type=fifo, queue=Q}, State) ->
-    insert_from_queue(fun queue:out/1, queue:out(Q), State);
-insert_from_queue(#queue{type=lifo, queue=Q}, State) ->
-    insert_from_queue(fun queue:out_r/1, queue:out_r(Q), State).
+insert_from_queue(#queue{type=fifo, queue=Q, backup=BQ}, State) ->
+    insert_from_queue(fun queue:out/1, queue:out(queue:join(BQ, Q)), State);
+insert_from_queue(#queue{type=lifo, queue=Q, backup=BQ}, State) ->
+    insert_from_queue(fun queue:out_r/1, queue:out_r(queue:join(BQ, Q)), State).
 
 insert_from_queue(F, {{value, Msg}, Q}, State) when is_tuple(Msg) ->
     insert_from_queue(F, F(Q), insert(Msg, State));
@@ -815,9 +829,10 @@ send_notification(#session{pid=Pid} = Session) ->
     vmq_mqtt_fsm:send(Pid, {mail, self(), new_data}),
     Session#session{status=passive}.
 
-cleanup_session(SubscriberId, #session{queue=#queue{queue=Q}}) ->
+cleanup_session(SubscriberId, #session{queue=#queue{queue=Q, backup=BQ}}) ->
     _ = vmq_metrics:incr_queue_unhandled(queue:len(Q)),
-    cleanup_queue(SubscriberId, Q).
+    %% it's possible that the backup queue isn't cleaned up yet.
+    cleanup_queue(SubscriberId, queue:join(Q, BQ)).
 
 cleanup_queue(_, {[],[]}) -> ok; %% optimization
 cleanup_queue(SId, Queue) ->
@@ -853,7 +868,7 @@ maybe_set_expiry_timer(0, State) ->
     %% never expire
     State;
 maybe_set_expiry_timer(ExpireAfter, State) when ExpireAfter > 0 ->
-    Ref = erlang:send_after(ExpireAfter * 1000, self(), expire_session),
+    Ref = gen_fsm:send_event_after(ExpireAfter * 1000, expire_session),
     State#state{expiry_timer=Ref}.
 
 maybe_offline_store(Offline, SubscriberId, {deliver, QoS, #vmq_msg{persisted=false} = Msg}) when QoS > 0 ->
@@ -891,7 +906,7 @@ maybe_offline_delete(_, _) -> ok.
 
 unset_expiry_timer(#state{expiry_timer=undefined} = State) -> State;
 unset_expiry_timer(#state{expiry_timer=Ref} = State) ->
-    erlang:cancel_timer(Ref),
+    gen_fsm:cancel_timer(Ref),
     State#state{expiry_timer=undefined}.
 
 state_change(Msg, OldStateName, NewStateName) ->

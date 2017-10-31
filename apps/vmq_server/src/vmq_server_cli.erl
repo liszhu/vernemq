@@ -59,6 +59,7 @@ register_cli() ->
     vmq_cluster_leave_cmd(),
     vmq_cluster_upgrade_cmd(),
 
+    vmq_mgmt_add_api_key_cmd(),
     vmq_mgmt_create_api_key_cmd(),
     vmq_mgmt_delete_api_key_cmd(),
     vmq_mgmt_list_api_keys_cmd(),
@@ -82,9 +83,11 @@ register_cli_usage() ->
 
 
     clique:register_usage(["vmq-admin", "metrics"], metrics_usage()),
+    clique:register_usage(["vmq-admin", "metrics", "show"], metrics_show_usage()),
 
     clique:register_usage(["vmq-admin", "api-key"], api_usage()),
     clique:register_usage(["vmq-admin", "api-key", "delete"], api_delete_key_usage()),
+    clique:register_usage(["vmq-admin", "api-key", "add"], api_add_key_usage()),
     ok.
 
 vmq_server_stop_cmd() ->
@@ -118,23 +121,41 @@ vmq_server_show_cmd() ->
 
 vmq_server_metrics_cmd() ->
     Cmd = ["vmq-admin", "metrics", "show"],
-    Callback = fun(_, _, _) ->
+    FlagSpecs = [{describe, [{shortname, "d"},
+                             {longname, "with-descriptions"}]}],
+    Callback = fun(_, _, Flags) ->
+                       Normalize = fun({T,M,V}) ->
+                                           {T,M,V,undefined};
+                                      ({T,M,V,D}) ->
+                                           {T,M,V,D}
+                                    end,
+                       Describe = lists:keymember(describe, 1, Flags),
                        lists:foldl(
-                         fun({Type, Metric, Val}, Acc) ->
+                         fun(M, Acc) ->
+                                 {Type, Metric, Val, Description} = Normalize(M),
                                  SType = atom_to_list(Type),
                                  SMetric = atom_to_list(Metric),
                                  SVal =
-                                 case Val of
-                                     V when is_integer(V) ->
-                                         integer_to_list(V);
-                                     V when is_float(V) ->
-                                         float_to_list(V)
-                                 end,
+                                     case Val of
+                                         V when is_integer(V) ->
+                                             integer_to_list(V);
+                                         V when is_float(V) ->
+                                             float_to_list(V)
+                                     end,
                                  Line = [SType, ".", SMetric, " = ", SVal],
-                                 [clique_status:text(lists:flatten(Line))|Acc]
-                         end, [], vmq_metrics:metrics())
+                                 case Describe of 
+                                     true ->
+                                         [clique_status:text(lists:flatten(["# ", Description])),
+                                          clique_status:text(lists:flatten([Line, "\n"]))|Acc];
+                                     false ->
+                                         [clique_status:text(lists:flatten(Line))|Acc]
+                                 end
+                         end,
+                         [],
+                         vmq_metrics:metrics(Describe))
                end,
-    clique:register_command(Cmd, [], [], Callback).
+    clique:register_command(Cmd, [], FlagSpecs, Callback).
+
 
 vmq_server_metrics_reset_cmd() ->
     Cmd = ["vmq-admin", "metrics", "reset"],
@@ -366,6 +387,21 @@ vmq_mgmt_create_api_key_cmd() ->
                end,
     clique:register_command(Cmd, KeySpecs, FlagSpecs, Callback).
 
+vmq_mgmt_add_api_key_cmd() ->
+    Cmd = ["vmq-admin", "api-key", "add"],
+    KeySpecs = [{'key', [{typecast, fun(Key) ->
+                                            list_to_binary(Key)
+                                    end}]}],
+    FlagSpecs = [],
+    Callback = fun(_, [{'key', Key}], _) ->
+                       vmq_http_mgmt_api:add_api_key(Key),
+                       [clique_status:text("Done")];
+                  (_,_,_) ->
+                       Text = clique_status:text(api_add_key_usage()),
+                       [clique_status:alert([Text])]
+               end,
+    clique:register_command(Cmd, KeySpecs, FlagSpecs, Callback).
+
 vmq_mgmt_delete_api_key_cmd() ->
     Cmd = ["vmq-admin", "api-key", "delete"],
     KeySpecs = [{'key', [{typecast, fun(Key) ->
@@ -374,7 +410,10 @@ vmq_mgmt_delete_api_key_cmd() ->
     FlagSpecs = [],
     Callback = fun(_, [{'key', Key}], _) ->
                        vmq_http_mgmt_api:delete_api_key(Key),
-                       [clique_status:text("Done")]
+                       [clique_status:text("Done")];
+                  (_,_,_) ->
+                       Text = clique_status:text(api_delete_key_usage()),
+                       [clique_status:alert([Text])]
                end,
     clique:register_command(Cmd, KeySpecs, FlagSpecs, Callback).
 
@@ -492,11 +531,20 @@ metrics_usage() ->
      "    show        Prints all available metrics for this VerneMQ node.\n"
     ].
 
+metrics_show_usage() ->
+    ["vmq-admin metrics show\n\n",
+     "  Prints all available metrics for this VerneMQ node.\n\n",
+     "Options\n\n",
+     "  --with-descriptions, -d,\n"
+     "    Show metrics annotated with descriptions.\n"
+    ].
+
 api_usage() ->
     ["vmq-admin api-key <sub-command>\n\n",
-     "  Create, delete, and show API keys for the HTTP management interface.\n\n",
+     "  Create, add, delete, and show API keys for the HTTP management interface.\n\n",
      "  Sub-commands:\n",
      "    create      Creates a new API key.\n",
+     "    add         Adds a new API key.\n",
      "    delete      Deletes an existing API key.\n",
      "    show        Shows all API keys.\n"
     ].
@@ -504,6 +552,11 @@ api_usage() ->
 api_delete_key_usage() ->
     ["vmq-admin api-key delete key=<API Key>\n\n",
      "  Deletes an existing API Key.\n\n"
+    ].
+
+api_add_key_usage() ->
+    ["vmq-admin api-key add key=<API Key>\n\n",
+     "  Adds an API Key.\n\n"
     ].
 
 ensure_all_stopped(App)  ->

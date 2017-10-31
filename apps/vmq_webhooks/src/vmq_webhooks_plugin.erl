@@ -52,6 +52,10 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -define(SERVER, ?MODULE).
 
 -record(state, {}).
@@ -365,8 +369,10 @@ all_till_ok(HookName, Args) ->
 
 all_till_ok([{Endpoint,EOpts}|Rest], HookName, Args) ->
     case maybe_call_endpoint(Endpoint, EOpts, HookName, Args) of
+        [] -> ok;
         Modifiers when is_list(Modifiers) ->
-            case check_modifiers(HookName, Modifiers) of
+            NewModifiers = convert_subscriber_id(Modifiers),
+            case vmq_plugin_util:check_modifiers(HookName, NewModifiers) of
                 error ->
                     error;
                 ValidatedModifiers ->
@@ -378,6 +384,19 @@ all_till_ok([{Endpoint,EOpts}|Rest], HookName, Args) ->
             all_till_ok(Rest, HookName, Args)
     end;
 all_till_ok([], _, _) -> next.
+
+%% Collect client_id and mountpoint if they exist and move them in to
+%% a subscriber_id tuple. This is the format expected by
+%% `vmq_plugins_util:check_modifiers/1`
+convert_subscriber_id(Modifiers) ->
+    case {lists:keyfind(client_id, 1, Modifiers),
+          lists:keyfind(mountpoint, 1, Modifiers)} of
+        {{_, ClientId}, {_, Mountpoint}} when is_binary(ClientId) and is_binary(Mountpoint) ->
+            SubscriberId = {subscriber_id, [{client_id, ClientId}, {mountpoint, Mountpoint}]},
+            [SubscriberId | lists:keydelete(mountpoint, 1, lists:keydelete(client_id, 1, Modifiers))];
+        _ ->
+            Modifiers
+    end.
 
 all(HookName, Args) ->
     case ets:lookup(?TBL, HookName) of
@@ -394,51 +413,6 @@ all([], _, _) -> next.
 
 unword(T) ->
     iolist_to_binary(vmq_topic:unword(T)).
-
-check_modifiers(Hook, Modifiers)
-  when (Hook == auth_on_publish) or (Hook == on_deliver)
-       or (Hook == on_offline_message) ->
-    case lists:keyfind(topic, 1, Modifiers) of
-        {topic, T} when is_binary(T) ->
-            case vmq_topic:validate_topic(publish, T) of
-                {ok, NewT} ->
-                    lists:keyreplace(topic, 1, Modifiers, {topic, NewT});
-                {error, R} ->
-                    lager:error("can't rewrite topic in ~p due to ~p", [Hook, R]),
-                    error
-            end;
-        false ->
-            Modifiers
-    end;
-check_modifiers(auth_on_subscribe, TopicsModifiers) ->
-    lists:foldl(fun (_, error) -> error;
-                    ([T, Q], AccTopics) when is_binary(T) and is_number(Q) ->
-                        case vmq_topic:validate_topic(subscribe, T) of
-                            {ok, NewTopic} ->
-                                [{NewTopic, to_internal_qos(round(Q))}|AccTopics];
-                            {error, R} ->
-                                lager:error("can't rewrite topic in auth_on_subscribe due to ~p", [R]),
-                                error
-                        end;
-                    (T, _) ->
-                        lager:error("can't rewrite topic in auth_on_subscribe due to wrong format ~p", [T]),
-                        error
-                end, [], TopicsModifiers);
-check_modifiers(on_unsubscribe, TopicsModifiers) ->
-    lists:foldl(fun (_, error) -> error;
-                    (T, AccTopics) when is_binary(T) ->
-                        case vmq_topic:validate_topic(subscribe, T) of
-                            {ok, NewTopic} ->
-                                [NewTopic|AccTopics];
-                            {error, R} ->
-                                lager:error("can't rewrite topic in on_unsubscribe due to ~p", [R]),
-                                error
-                        end;
-                    (T, _) ->
-                        lager:error("can't rewrite topic in on_unsubscribe due to wrong format ~p", [T]),
-                        error
-                end, [], TopicsModifiers);
-check_modifiers(_, Modifiers) -> Modifiers.
 
 peer({Peer, Port}) when is_tuple(Peer) and is_integer(Port) ->
     case inet:ntoa(Peer) of
@@ -511,10 +485,27 @@ call_endpoint(Endpoint, EOpts, Hook, Args) ->
 
 parse_headers(Headers) ->
     case hackney_headers:parse(<<"cache-control">>, Headers) of
-        <<"max-age=", MaxAgeBin/binary>> ->
-            #{max_age => erlang:binary_to_integer(MaxAgeBin)};
+        CC when is_binary(CC) ->
+            case parse_max_age(CC) of
+                MaxAge when is_integer(MaxAge) -> #{max_age => MaxAge};
+                _ -> #{}
+            end;
         _ -> #{}
     end.
+
+parse_max_age(<<>>) -> undefined;
+parse_max_age(<<"max-age=", MaxAgeVal/binary>>) ->
+    digits(MaxAgeVal);
+parse_max_age(<<_,Rest/binary>>) ->
+    parse_max_age(Rest).
+
+digits(<<D, Rest/binary>>) when D>=$0, D=<$9 ->
+    digits(Rest, D - $0);
+digits(_Data) -> {error, badarg}.
+
+digits(<<D, Rest/binary>>, Acc) when D>=$0, D=<$9 ->
+    digits(Rest, Acc*10 + (D - $0));
+digits(_, Acc) -> Acc.
 
 handle_response(Hook, #{max_age := MaxAge}, Decoded, EOpts)
   when Hook =:= auth_on_register;
@@ -552,11 +543,7 @@ handle_response(_Hook, _Decoded, _) ->
     next.
 
 normalize_modifiers(auth_on_register, Mods, _) ->
-    lists:map(
-      fun({mountpoint, Mountpoint}) ->
-              {mountpoint, binary_to_list(Mountpoint)};
-         (E) -> E
-      end, Mods);
+    Mods;
 normalize_modifiers(auth_on_subscribe, Topics, _) ->
     lists:map(
       fun(PL) ->
@@ -566,9 +553,7 @@ normalize_modifiers(auth_on_subscribe, Topics, _) ->
       Topics);
 normalize_modifiers(auth_on_publish, Mods, EOpts) ->
     lists:map(
-      fun({mountpoint, Mountpoint}) ->
-              {mountpoint, binary_to_list(Mountpoint)};
-         ({payload, Payload}) ->
+      fun({payload, Payload}) ->
               {payload, b64decode(Payload, EOpts)};
          (E) -> E
       end, Mods);
@@ -621,12 +606,16 @@ b64decode(V, #{base64_payload := false}) ->
 b64decode(V, _) -> 
     base64:decode(V).
 
-to_internal_qos(128) ->
-    not_allowed;
-to_internal_qos(V) when is_integer(V) ->
-    V.
-
 from_internal_qos(not_allowed) ->
     128;
 from_internal_qos(V) when is_integer(V) ->
     V.
+
+-ifdef(TEST).
+parse_max_age_test() ->
+    ?assertEqual(undefined, parse_max_age(<<>>)),
+    ?assertEqual({error, badarg}, parse_max_age(<<"max-age=">>)),
+    ?assertEqual({error, badarg}, parse_max_age(<<"max-age=x">>)),
+    ?assertEqual(45, parse_max_age(<<"  max-age=45,sthelse">>)),
+    ?assertEqual(45, parse_max_age(<<"max-age=45">>)).
+-endif.

@@ -23,9 +23,7 @@
 -export([msg_ref/0]).
 
 -define(CLOSE_AFTER, 5000).
--define(HIBERNATE_AFTER, 5000).
 -define(ALLOWED_MQTT_VERSIONS, [3, 4, 131]).
--define(MAX_SAMPLES, 10).
 
 -type timestamp() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}.
 -type msg_id() :: undefined | 1..65535.
@@ -94,7 +92,7 @@ init(Peer, Opts) ->
     MaxClientIdSize = vmq_config:get_env(max_client_id_size, 23),
     RetryInterval = vmq_config:get_env(retry_interval, 20),
     MaxInflightMsgs = vmq_config:get_env(max_inflight_messages, 20),
-    MaxMessageSize = vmq_config:get_env(message_size_limit, 0),
+    MaxMessageSize = vmq_config:get_env(max_message_size, 0),
     MaxMessageRate = vmq_config:get_env(max_message_rate, 0),
     UpgradeQoS = vmq_config:get_env(upgrade_outgoing_qos, false),
     RegView = vmq_config:get_env(default_reg_view, vmq_reg_trie),
@@ -414,11 +412,12 @@ connected(retry,
 connected(disconnect, State) ->
     lager:debug("stop due to disconnect", []),
     terminate(normal, State);
-connected(check_keepalive, #state{last_time_active=Last, keep_alive=KeepAlive} = State) ->
+connected(check_keepalive, #state{last_time_active=Last, keep_alive=KeepAlive,
+                                  subscriber_id=SubscriberId, username=UserName} = State) ->
     Now = os:timestamp(),
     case timer:now_diff(Now, Last) > (1500000 * KeepAlive) of
         true ->
-            lager:warning("stop due to keepalive expired", []),
+            lager:warning("client ~p with username ~p stopped due to keepalive expired", [SubscriberId, UserName]),
             terminate(normal, State);
         false ->
             set_keepalive_check_timer(KeepAlive),
@@ -1139,7 +1138,7 @@ get_info_items([peer_host|Rest], State, Acc) ->
     Host =
     case inet:gethostbyaddr(PeerIp) of
         {ok, {hostent, HostName, _, inet, _, _}} ->  HostName;
-        _ -> PeerIp
+        _ -> list_to_binary(inet:ntoa(PeerIp))
     end,
     get_info_items(Rest, State, [{peer_host, Host}|Acc]);
 get_info_items([protocol|Rest], State, Acc) ->

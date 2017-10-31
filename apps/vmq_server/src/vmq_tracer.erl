@@ -43,7 +43,7 @@
           client_id :: client_id(),
           mountpoint :: mountpoint(),
           payload_limit :: non_neg_integer(),
-          tracer :: function(),
+          tracer :: pid(),
           %% A map of all the sessions we are currently tracing. The
           %% key is the pid of the session
           sessions :: list({pid(), reference()}),
@@ -501,33 +501,33 @@ format_mqtt_(#mqtt_connect{proto_ver = Ver, username = Username,
                            password = Password, clean_session = CleanSession,
                            keep_alive = KeepAlive, client_id = ClientId, will_retain = WillRetain,
                            will_qos = WillQoS, will_topic = WillTopic, will_msg = WillMsg}, Opts) ->
-    [{"CONNECT(clientid: ~s ver: ~p, user: ~s, pass: ~s, cs: ~p, ka: ~p)~n",
+    [{"CONNECT(c: ~s, v: ~p, u: ~s, p: ~s, cs: ~p, ka: ~p)~n",
       [ClientId, Ver, Username, Password, CleanSession, KeepAlive]},
      format_lwt(WillRetain, WillQoS, WillTopic, WillMsg, Opts)];
 format_mqtt_(#mqtt_connack{session_present = SP, return_code = RC}, _) ->
-    {"CONNACK(sp: ~p, rc: ~p)~n", [f(SP), RC]};
+    {"CONNACK(sp: ~p, rc: ~p)~n", [fflag(SP), RC]};
 format_mqtt_(#mqtt_publish{message_id = MId, topic = Topic, qos = QoS, retain = Retain,
                             dup = Dup, payload = Payload}, #{payload_limit := Limit}) ->
     {"PUBLISH(d~p, q~p, r~p, m~p, \"~s\") with payload:~n"
-     "    ~s~n", [f(Dup), QoS, f(Retain), MId, jtopic(Topic), trunc_payload(Payload, Limit)]};
+     "    ~s~n", [fflag(Dup), QoS, fflag(Retain), fmid(MId), jtopic(Topic), trunc_payload(Payload, Limit)]};
 format_mqtt_(#mqtt_puback{message_id = MId}, _) ->
-    {"PUBACK(m~p)~n", [MId]};
+    {"PUBACK(m~p)~n", [fmid(MId)]};
 format_mqtt_(#mqtt_pubrec{message_id = MId}, _) ->
-    {"PUBREC(m~p)~n", [MId]};
+    {"PUBREC(m~p)~n", [fmid(MId)]};
 format_mqtt_(#mqtt_pubrel{message_id = MId}, _) ->
-    {"PUBREL(m~p)~n", [MId]};
+    {"PUBREL(m~p)~n", [fmid(MId)]};
 format_mqtt_(#mqtt_pubcomp{message_id = MId}, _) ->
-    {"PUBCOMP(m~p)~n", [MId]};
+    {"PUBCOMP(m~p)~n", [fmid(MId)]};
 format_mqtt_(#mqtt_subscribe{message_id = MId, topics = Topics}, _) ->
-    [{"SUBSCRIBE(m~p) with topics:~n", [MId]}, ftopics(Topics)];
+    [{"SUBSCRIBE(m~p) with topics:~n", [fmid(MId)]}, ftopics(Topics)];
 format_mqtt_(#mqtt_suback{message_id = MId, qos_table = QoSTable}, _) ->
-    {"SUBACK(m~p, qt~p)~n", [MId, QoSTable]};
+    {"SUBACK(m~p, qt~p)~n", [fmid(MId), QoSTable]};
 format_mqtt_(#mqtt_unsubscribe{message_id = MId}, _) ->
-    {"UNSUBSCRIBE(m~p)~n", [MId]};
+    {"UNSUBSCRIBE(m~p)~n", [fmid(MId)]};
 format_mqtt_(#mqtt_unsuback{message_id = MId}, _) ->
-    {"UNSUBACK(m~p)~n", [MId]};
+    {"UNSUBACK(m~p)~n", [fmid(MId)]};
 format_mqtt_(#mqtt_disconnect{}, _) ->
-    {"DISCONNECT()~n"}.
+    {"DISCONNECT()~n", []}.
 
 trunc_payload(Payload, Limit) when byte_size(Payload) =< Limit ->
     Payload;
@@ -554,8 +554,13 @@ prepf(L) ->
 r(S) ->
     {S, []}.
 
-f(true) -> 1;
-f(false) -> 0.
+fmid(undefined) -> 0;
+fmid(Mid) -> Mid.
+
+fflag(1) -> 1;
+fflag(0) -> 0;
+fflag(true) -> 1;
+fflag(false) -> 0.
 
 jtopic(T) when is_list(T) ->
     erlang:iolist_to_binary(vmq_topic:unword(T)).

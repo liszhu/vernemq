@@ -1,5 +1,85 @@
 # Changelog
 
+## Not yet released
+
+- Handle uncaught error type in the `vmq_ql_query` handler.
+- Make sure the `peer_host` can always be retrieved via the HTTP API. It was
+  returned as an erlang tuple which caused the conversion to JSON to fail.
+- Fix issue causing too few results to be returned from `vmq-admin session show`
+  when used with filter options. This could happen when terms included in the
+  filters also existed as erlang atoms.
+- Plugin workflow improvements: move plugin development specific things into
+  `vernemq_dev`.
+- Fix error in the HTTP API interface. The alias `/api/v1/sessions` mapped to
+  `session list` which is deprecated for `session show`.
+- Fix `max-age` parse issue in `vmq_webhooks` (#527).
+
+## VERNEMQ 1.2.0
+
+- Fix retain msg server race condition preventing some messages from being
+  persisted and replicated to other nodes in the cluster (#507).
+- Log when a client is disconnected and multiple sessions are not allowed.
+- Fix tracer `mountpoint` parameter bug.
+- Make it possible to add/inject HTTP API keys.
+- Add Erlang VM memory usage stats to the exposed metrics.
+- Fix bug with `max_message_size` and `message_size_limit` only one of these
+  should exist and `message_size_limit` has now been deprecated and no longer
+  has any effect. `max_message_size` should be used instead.
+- Fix bug in `vmq_diversity` where the MongoDB client pool would not reconnect
+  after a MongDB restart (#475).
+- Fix bug in `vmq_diversity` where the PostgreSQL client pool would not reconnect
+  after a PostgreSQL restart (same as #475).
+
+## VERNEMQ 1.1.1
+
+- Fix bug preventing persistent session expiration
+  (`persistent_client_expiration` in `vernemq.conf`) from being executed.
+- Make `vmq-admin session show` more robust when sessions are overloaded by
+  limiting the time allowed to query each session. The default query timeout is
+  100ms, but can be overriden using `--rowtimeout=<TimeoutInMilliseconds>`.
+- Add support for Erlang/OTP20.
+- Improve tracer usage text.
+- Fix `vmq_diversity` memcached issue (#460).
+- Fix RPM package issue preventing a clean upgrade.
+- Fix code path bug related to upgrading plugins.
+- Update `plumtree` with a fix to make the plumtree mailbox traversal
+  measurement more accurate and therefore less spammy.
+
+## VERNEMQ 1.1.0
+
+- Add more detail to the client expiration log message.
+- Safeguard Lua function calls
+- Fix bug where websocket connections were incorrectly terminated (#387).
+- Fix breakage of event hook chain in `vmq_passwd` (#396).
+- Lua script balancing for improved Lua hook performance.
+- Add descriptions to all available metrics via `vmq-admin metrics show
+  --with-descriptions`.
+- Add Prometheus HELP lines for every metric.
+- Add a log message (info level) indicating that connectivity to a remote node
+  has been restored.
+- Minor changes to the formatting of the tracer output.
+
+## VERNEMQ 1.0.1
+
+- Purge node-local clean session true subscriber data when restarting
+  VerneMQ as these would otherwise erroneously still exist.
+- The metrics reporting sizes of retained messages `gauge.retain_memory` and
+  routes `gauge.router_memory` were incorrectly done in system word sizes
+  instead of in bytes. This has been corrected. Further the
+  `gauge.retain_memory` metric now also includes temporary storage used before
+  persisting messages to disk.
+- Fix bug causing hooks to be registered multiple times when reloading lua
+  scripts (#348).
+- Fix bug occurring when publishing across nodes where more than one subscriber
+  are on one node and the publisher on another. In this case only one of the
+  subscribers would receive the message.
+- Fix formatting bug in the `vmq-admin trace` command.
+- Handle empty modifier list correctly in `vmq_webhooks` (#339).
+- Handle client_id and mountpoint modifiers correctly in `vmq_webhooks` (#332).
+- Fix vmq-admin session show when multiple filters are applied
+- Fix bug where an aborted connection handshake caused queued messages not 
+  being migrated properly to remote node.
+
 ## VERNEMQ 1.0.0
 
 - To make the `vmq-admin` tool more consistent, the following changes have been

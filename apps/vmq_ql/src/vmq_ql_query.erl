@@ -29,10 +29,14 @@
          terminate/2,
          code_change/3]).
 
+%% testing
+-export([required_fields/1, include_fields/2]).
+
 -callback fields_config() -> [info_table()].
--callback fold_init_rows(function(), any()) -> any().
+-callback fold_init_rows(atom(), function(), any()) -> any().
 
 -record(state, {mgr, query, next, result_table}).
+-define(ROWQUERYTIMEOUT, 100).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -132,6 +136,8 @@ internal_query(Str) ->
     try vmq_ql_parser:parse(Str) of
         {fail, E} ->
             {error, E};
+        {_Parsed,Unparsed,Loc} ->
+            {error, {parse_error,Unparsed,Loc}};
         Parsed when is_list(Parsed) ->
             eval(proplists:get_value(type, Parsed), Parsed)
     catch
@@ -145,9 +151,15 @@ eval("SELECT", Query) ->
     Where = proplists:get_value(where, Query),
     OrderBy = proplists:get_value(orderby, Query),
     Limit = proplists:get_value(limit, Query),
-    select(Fields, module(From), Where, OrderBy, Limit).
+    RowQueryTimeout =
+        case proplists:get_value(rowtimeout, Query) of
+            [] -> ?ROWQUERYTIMEOUT;
+            Val -> Val
+        end,
+    select(Fields, From, Where, OrderBy, Limit, RowQueryTimeout).
 
-select(Fields, Module, Where, OrderBy, Limit) ->
+select(Fields, From, Where, OrderBy, Limit, RowQueryTimeout) ->
+    Module = module(From),
     FieldsConfig = Module:fields_config(),
     RequiredFields = lists:usort((required_fields(Where)
                                   ++ include_fields(FieldsConfig, Fields)
@@ -156,22 +168,37 @@ select(Fields, Module, Where, OrderBy, Limit) ->
     EmptyResultRow = empty_result_row(FieldsConfig, Fields),
     Results = ets:new(?MODULE, [ordered_set]),
     try
-        Module:fold_init_rows(
+        Module:fold_init_rows(From,
           fun(InitRow, Idx) ->
-                  PreparedRows = initialize_row(RowInitializer, InitRow),
-                  lists:foldl(
-                    fun(Row, AccIdx) ->
-                            put({?MODULE, row_data}, Row),
-                            case eval_query(Where) of
-                                true ->
-                                    raise_enough_data(AccIdx, OrderBy, Limit, enough_data),
-                                    Key = order_by_key(AccIdx, OrderBy, Row),
-                                    ets:insert(Results,
-                                               {Key, filter_row(Fields, EmptyResultRow, Row)}),
-                                    AccIdx + 1;
-                                false -> AccIdx
-                            end
-                    end, Idx, PreparedRows)
+                  CallerRef = make_ref(),
+                  Self = self(),
+                  Pid = spawn_link(fun() -> spawn_initialize_row(CallerRef, Self, RowInitializer, InitRow) end),
+                  receive
+                      {CallerRef, {ok, PreparedRows}} ->
+                          lists:foldl(
+                            fun(Row, AccIdx) ->
+                                    put({?MODULE, row_data}, Row),
+                                    case eval_query(Where) of
+                                        true ->
+                                            raise_enough_data(AccIdx, OrderBy, Limit, enough_data),
+                                            Key = order_by_key(AccIdx, OrderBy, Row),
+                                            ets:insert(Results,
+                                                       {Key, filter_row(Fields, EmptyResultRow, Row)}),
+                                            AccIdx + 1;
+                                        false -> AccIdx
+                                    end
+                            end, Idx, PreparedRows);
+                      {CallerRef, {error, _}} ->
+                          Idx
+                  after
+                      RowQueryTimeout ->
+                          unlink(Pid),
+                          exit(Pid, kill),
+                          %% TODO: This warning needs more detailed
+                          %% information to be really useful.
+                          lager:warning("Subquery failed due to timeout"),
+                          Idx
+                  end
           end, 1)
     catch
         exit:enough_data ->
@@ -179,7 +206,7 @@ select(Fields, Module, Where, OrderBy, Limit) ->
             ok;
         E1:R1 ->
             ets:delete(Results),
-            lager:error("Select query terminated due to ~p ~p", [E1, R1]),
+            lager:error("Select query terminated due to ~p ~p, stacktrace: ~p", [E1, R1, erlang:get_stacktrace()]),
             exit({E1, R1})
     end,
     case is_integer(Limit) of
@@ -252,6 +279,16 @@ include_fields(FieldConfig, [F|Rest], Acc) ->
     include_fields(FieldConfig, Rest, [F|Acc]);
 include_fields(_, [], Acc) -> Acc.
 
+spawn_initialize_row(CallerRef, CallerPid, RowInitializer, InitRow) ->
+    try
+        CallerPid ! {CallerRef, {ok, initialize_row(RowInitializer, InitRow)}}
+    catch
+        C:E ->
+            lager:warning("Subquery failed. ~nStacktrace:~s",
+                          [lager:pr_stacktrace(erlang:get_stacktrace(), {C,E})]),
+            CallerPid ! {CallerRef, {error, E}}
+    end.
+
 initialize_row([InitFun], Row) ->
     InitFun(Row);
 initialize_row([InitFun|Rest], Row) ->
@@ -276,19 +313,20 @@ raise_enough_data(_, _, _, _) -> ignore.
 
 
 required_fields(Where) ->
-    lists:foldl(fun(A, Atoms) when is_atom(A) ->
-                        [A|Atoms];
-                   (_, Atoms) -> Atoms
-                end, [], prepare(Where, [])).
+    [A || A <- prepare(Where, []), is_atom(A)].
 
 prepare([], Acc) -> lists:usort(Acc);
 
+prepare([Ops|Rest], Acc) when is_list(Ops) ->
+    prepare(Rest, prepare(Ops, Acc));
+
 prepare([{op, V1, _Op, V2}|Rest], Acc) ->
-    prepare(Rest, [V1, V2|Acc]);
+    prepare(Rest, prepare(V2, [V1|Acc]));
 prepare([{_, {op, V1, _Op, V2}}|Rest], Acc) ->
-    prepare(Rest, [V1, V2|Acc]);
-prepare([{_, Ops}|Rest], Acc) when is_list(Ops) ->
-    prepare(Rest, prepare(Ops, Acc)).
+    prepare(Rest, prepare(V2, [V1|Acc]));
+prepare({op, V1, _Op, V2}, Acc) ->
+    prepare(V2, [V1|Acc]);
+prepare(V, Acc) -> [V|Acc].
 
 filter_row([all], EmptyResultRow, Row) ->
     maps:merge(EmptyResultRow, Row);
@@ -336,8 +374,8 @@ eval_op(lesser, V1, V2) -> v(V1) < v(V2);
 eval_op(lesser_equals, V1, V2) -> v(V1) =< v(V2);
 eval_op(greater, V1, V2) -> v(V1) > v(V2);
 eval_op(greater_equals, V1, V2) -> v(V1) >= v(V2);
-eval_op(like, V, V) -> true;
-eval_op(like, V1, V2) ->
+eval_op(match, V, V) -> true;
+eval_op(match, V1, V2) ->
     case {v(V1), v(V2)} of
         {V, P} when (is_list(V) or is_binary(V))
                 and (is_list(P) or is_binary(P)) ->
@@ -363,14 +401,13 @@ v(false) -> false;
 v(undefined) -> null;
 v(V) when is_atom(V) ->
     lookup_ident(V);
-v(V) when is_pid(V) ->
-    list_to_binary(pid_to_list(V));
-v(V) ->
+v(<<"<", _/binary>> = MaybePid) ->
     try
-        binary_to_existing_atom(V, utf8)
+        list_to_pid(binary_to_list(MaybePid))
     catch
-        _:_ -> V
-    end.
+        _:_ -> MaybePid
+    end;
+v(V) -> V.
 
 lookup_ident(Ident) ->
     Row = get({?MODULE, row_data}),
